@@ -1,0 +1,195 @@
+version: '3.8'
+
+services:
+  # PostgreSQL Database
+  postgres:
+    image: postgres:14-alpine
+    container_name: dabcam_db
+    environment:
+      POSTGRES_DB: dabcam
+      POSTGRES_USER: dabcam_user
+      POSTGRES_PASSWORD: ${DB_PASSWORD:-changeme123}
+      POSTGRES_INITDB_ARGS: "-c shared_buffers=256MB -c max_connections=100"
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - ./backend/db/init.sql:/docker-entrypoint-initdb.d/init.sql
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U dabcam_user -d dabcam"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    networks:
+      - dabcam-net
+
+  # Redis Cache & Session Store
+  redis:
+    image: redis:7-alpine
+    container_name: dabcam_cache
+    ports:
+      - "6379:6379"
+    command: redis-server --appendonly yes --requirepass ${REDIS_PASSWORD:-redis123}
+    volumes:
+      - redis_data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    networks:
+      - dabcam-net
+
+  # FastAPI Backend
+  backend:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    container_name: dabcam_backend
+    ports:
+      - "8001:8000"
+    environment:
+      DATABASE_URL: postgresql://dabcam_user:${DB_PASSWORD:-changeme123}@postgres:5432/dabcam
+      REDIS_URL: redis://:${REDIS_PASSWORD:-redis123}@redis:6379/0
+      SECRET_KEY: ${SECRET_KEY:-your-secret-key-change-in-production}
+      MSF_RPC_HOST: metasploit
+      MSF_RPC_PORT: 55553
+      MSF_RPC_USER: msf
+      MSF_RPC_PASS: ${MSF_PASSWORD:-changeme123}
+      ENVIRONMENT: development
+      LOG_LEVEL: INFO
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    volumes:
+      - ./backend:/app
+      - /app/__pycache__
+      - secure_storage:/secure/storage
+      - secure_binaries:/secure/binaries
+    command: uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/api/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    networks:
+      - dabcam-net
+
+  # MetasploitMCP Bridge
+  msf-bridge:
+    build:
+      context: ./msf-bridge
+      dockerfile: Dockerfile
+    container_name: dabcam_msf_bridge
+    ports:
+      - "8002:8000"
+    environment:
+      MSF_RPC_HOST: metasploit
+      MSF_RPC_PORT: 55553
+      MSF_RPC_USER: msf
+      MSF_RPC_PASS: ${MSF_PASSWORD:-changeme123}
+      DATABASE_URL: postgresql://dabcam_user:${DB_PASSWORD:-changeme123}@postgres:5432/dabcam
+      BACKEND_URL: http://backend:8000
+    depends_on:
+      - metasploit
+      - backend
+    volumes:
+      - ./msf-bridge:/app
+    networks:
+      - dabcam-net
+
+  # Metasploit RPC Server
+  metasploit:
+    image: metasploitframework/metasploit-framework:latest
+    container_name: dabcam_msf
+    ports:
+      - "55553:55553"
+      - "4444:4444"
+    environment:
+      MSFRPC_PORT: 55553
+      MSFRPC_USER: msf
+      MSFRPC_PASS: ${MSF_PASSWORD:-changeme123}
+      MSFRPC_HOST: 0.0.0.0
+    volumes:
+      - msf_data:/root/.msf4
+    networks:
+      - dabcam-net
+
+  # nginx Reverse Proxy
+  nginx:
+    image: nginx:alpine
+    container_name: dabcam_proxy
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./nginx/nginx.conf:/etc/nginx/nginx.conf:ro
+      - ./nginx/ssl:/etc/nginx/ssl:ro
+      - ./nginx/conf.d:/etc/nginx/conf.d:ro
+    depends_on:
+      - backend
+      - frontend
+    networks:
+      - dabcam-net
+
+  # React Frontend (Development)
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+    container_name: dabcam_frontend
+    ports:
+      - "3000:3000"
+    environment:
+      REACT_APP_API_URL: http://localhost:8001
+      REACT_APP_MSF_API_URL: http://localhost:8002
+    volumes:
+      - ./frontend/src:/app/src
+      - /app/node_modules
+    command: npm start
+    networks:
+      - dabcam-net
+
+  # pgAdmin for Database Management
+  pgadmin:
+    image: dpage/pgadmin4:latest
+    container_name: dabcam_pgadmin
+    ports:
+      - "5050:80"
+    environment:
+      PGADMIN_DEFAULT_EMAIL: admin@example.com
+      PGADMIN_DEFAULT_PASSWORD: ${PGADMIN_PASSWORD:-admin123}
+    depends_on:
+      - postgres
+    volumes:
+      - pgadmin_data:/var/lib/pgadmin
+    networks:
+      - dabcam-net
+
+  # Redis Commander for Cache Debugging
+  redis-commander:
+    image: rediscommander/redis-commander:latest
+    container_name: dabcam_redis_commander
+    ports:
+      - "8081:8081"
+    environment:
+      REDIS_HOSTS: local:redis:6379
+      REDIS_PASSWORD: ${REDIS_PASSWORD:-redis123}
+    depends_on:
+      - redis
+    networks:
+      - dabcam-net
+
+networks:
+  dabcam-net:
+    driver: bridge
+
+volumes:
+  postgres_data:
+  redis_data:
+  msf_data:
+  pgadmin_data:
+  secure_storage:
+  secure_binaries:
