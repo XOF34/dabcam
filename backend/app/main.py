@@ -87,7 +87,11 @@ async def shutdown_event():
 async def lifespan(app: FastAPI):
     """Manage application lifespan"""
     await startup_event()
+    # Initialize webhook manager
+    from app.services.webhook_manager import initialize_webhooks, shutdown_webhooks
+    await initialize_webhooks()
     yield
+    await shutdown_webhooks()
     await shutdown_event()
 
 # ============================================
@@ -305,7 +309,11 @@ app.include_router(csrf_tokens.router, prefix="/api/csrf", tags=["csrf"])
 from app.api import metasploit
 app.include_router(metasploit.router, prefix="/api/metasploit", tags=["metasploit"])
 
-# Webhooks (TODO: will be created in next phase)
+# Webhook Management
+from app.api import webhooks
+app.include_router(webhooks.router, tags=["webhooks"])
+
+# Event Webhooks (TODO: will be created in next phase)
 # from app.webhooks import capture_webhook, session_webhook
 # app.include_router(capture_webhook.router, prefix="/webhook", tags=["webhooks"])
 # app.include_router(session_webhook.router, prefix="/webhook", tags=["webhooks"])
