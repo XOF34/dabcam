@@ -168,7 +168,22 @@ async def add_security_headers(request: Request, call_next):
 
     return response
 
-# 4. CSRF Protection
+# 4. CSRF Protection Middleware
+from app.middleware.csrf_middleware import CSRFMiddleware
+import redis
+
+# Try to initialize Redis for CSRF service
+try:
+    csrf_redis = redis.from_url(settings.REDIS_URL)
+    csrf_redis.ping()
+    logger.info("✅ CSRF Redis connection established")
+except Exception as e:
+    csrf_redis = None
+    logger.warning(f"⚠️  CSRF Redis connection failed: {e}")
+
+app.add_middleware(CSRFMiddleware, redis_client=csrf_redis)
+
+# Legacy CSRF protection (from fastapi-csrf-protect)
 CsrfProtect.init_app(app)
 
 # ============================================
@@ -285,6 +300,10 @@ app.include_router(captures.router, prefix="/api/captures", tags=["captures"])
 # Binary Dependencies
 from app.api import binaries
 app.include_router(binaries.router, prefix="/api/binaries", tags=["binaries"])
+
+# CSRF Token Management
+from app.api import csrf_tokens
+app.include_router(csrf_tokens.router, prefix="/api/csrf", tags=["csrf"])
 
 # Webhooks
 from app.webhooks import capture_webhook, session_webhook
