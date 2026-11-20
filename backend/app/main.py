@@ -305,6 +305,10 @@ app.include_router(binaries.router, prefix="/api/binaries", tags=["binaries"])
 from app.api import csrf_tokens
 app.include_router(csrf_tokens.router, prefix="/api/csrf", tags=["csrf"])
 
+# Metasploit Bridge
+from app.api import metasploit
+app.include_router(metasploit.router, prefix="/api/metasploit", tags=["metasploit"])
+
 # Webhooks
 from app.webhooks import capture_webhook, session_webhook
 app.include_router(capture_webhook.router, prefix="/webhook", tags=["webhooks"])
