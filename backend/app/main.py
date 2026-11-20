@@ -21,7 +21,6 @@ from pythonjsonlogger import jsonlogger
 import structlog
 
 # Security
-from fastapi_csrf_protect import CsrfProtect
 from fastapi.security import HTTPBearer
 
 # Database
@@ -183,9 +182,6 @@ except Exception as e:
 
 app.add_middleware(CSRFMiddleware, redis_client=csrf_redis)
 
-# Legacy CSRF protection (from fastapi-csrf-protect)
-CsrfProtect.init_app(app)
-
 # ============================================
 # Error Handlers
 # ============================================
@@ -281,17 +277,17 @@ async def check_metasploit():
 # API Routes
 # ============================================
 
-# Campaign Management
-from app.api import campaigns
-app.include_router(campaigns.router, prefix="/api/campaigns", tags=["campaigns"])
+# Campaign Management (TODO: will be created in next phase)
+# from app.api import campaigns
+# app.include_router(campaigns.router, prefix="/api/campaigns", tags=["campaigns"])
 
-# Target Management
-from app.api import targets
-app.include_router(targets.router, prefix="/api/targets", tags=["targets"])
+# Target Management (TODO: will be created in next phase)
+# from app.api import targets
+# app.include_router(targets.router, prefix="/api/targets", tags=["targets"])
 
-# Session Management
-from app.api import sessions
-app.include_router(sessions.router, prefix="/api/sessions", tags=["sessions"])
+# Session Management (TODO: will be created in next phase)
+# from app.api import sessions
+# app.include_router(sessions.router, prefix="/api/sessions", tags=["sessions"])
 
 # Photo Capture
 from app.api import captures
@@ -309,10 +305,10 @@ app.include_router(csrf_tokens.router, prefix="/api/csrf", tags=["csrf"])
 from app.api import metasploit
 app.include_router(metasploit.router, prefix="/api/metasploit", tags=["metasploit"])
 
-# Webhooks
-from app.webhooks import capture_webhook, session_webhook
-app.include_router(capture_webhook.router, prefix="/webhook", tags=["webhooks"])
-app.include_router(session_webhook.router, prefix="/webhook", tags=["webhooks"])
+# Webhooks (TODO: will be created in next phase)
+# from app.webhooks import capture_webhook, session_webhook
+# app.include_router(capture_webhook.router, prefix="/webhook", tags=["webhooks"])
+# app.include_router(session_webhook.router, prefix="/webhook", tags=["webhooks"])
 
 # ============================================
 # Request Logging Middleware
