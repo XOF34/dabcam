@@ -3,6 +3,7 @@ Metasploit Framework (MSF) Bridge Service.
 
 Integrates Dabcam camera exploitation with Metasploit Framework.
 Handles RPC communication, session management, and exploitation workflows.
+Emits webhook events for all major operations.
 """
 
 import logging
@@ -17,6 +18,7 @@ import sqlalchemy as sa
 from sqlalchemy.orm import Session
 
 from app.models import Campaign, Target, MSFSession, PostModuleExecution, AuditLog
+from app.services.msf_webhook_dispatcher import MSFWebhookDispatcher
 
 
 logger = logging.getLogger(__name__)
@@ -136,6 +138,15 @@ class MSFBridge:
             f"campaign={campaign_id}, target={target_id}, ip={target_ip}:{target_port}"
         )
 
+        # Emit exploitation started event
+        await MSFWebhookDispatcher.emit_exploitation_started(
+            campaign_id=campaign_id,
+            target_id=target_id,
+            target_ip=target_ip,
+            target_port=target_port,
+            db_session=db_session
+        )
+
         workflow_result = {
             'campaign_id': campaign_id,
             'target_id': target_id,
@@ -163,8 +174,28 @@ class MSFBridge:
             )
             workflow_result['stages'][ExploitStage.EXPLOITATION.value] = exploit_result
 
+            # Emit exploitation success events for each session
             if exploit_result.get('sessions'):
                 workflow_result['sessions'].extend(exploit_result['sessions'])
+                for session in exploit_result['sessions']:
+                    await MSFWebhookDispatcher.emit_exploitation_success(
+                        campaign_id=campaign_id,
+                        target_id=target_id,
+                        target_ip=target_ip,
+                        exploit_name=session.get('exploit', 'unknown'),
+                        session_id=session.get('session_id', ''),
+                        db_session=db_session
+                    )
+                    # Emit session created event
+                    await MSFWebhookDispatcher.emit_session_created(
+                        campaign_id=campaign_id,
+                        target_id=target_id,
+                        session_id=session.get('session_id', ''),
+                        session_type='meterpreter',
+                        target_host=target_ip,
+                        exploit_used=session.get('exploit', 'unknown'),
+                        db_session=db_session
+                    )
 
             # Stage 3: Post-Exploitation
             if workflow_result['sessions']:
@@ -176,7 +207,7 @@ class MSFBridge:
             # Stage 4: C2
             if workflow_result['sessions']:
                 c2_result = await self._establish_c2(
-                    campaign_id, target_id, workflow_result['sessions']
+                    campaign_id, target_id, workflow_result['sessions'], db_session
                 )
                 workflow_result['stages'][ExploitStage.C2.value] = c2_result
 
@@ -191,6 +222,16 @@ class MSFBridge:
             logger.exception(f"Exploitation workflow error: {e}")
             workflow_result['status'] = 'failed'
             workflow_result['error'] = str(e)
+
+            # Emit exploitation failure event
+            await MSFWebhookDispatcher.emit_exploitation_failure(
+                campaign_id=campaign_id,
+                target_id=target_id,
+                target_ip=target_ip,
+                reason=str(e),
+                db_session=db_session
+            )
+
             return workflow_result
 
     async def _run_reconnaissance(
@@ -467,6 +508,16 @@ class MSFBridge:
 
             logger.info(f"✅ Post module executed: {module_path}")
 
+            # Emit post module executed event
+            await MSFWebhookDispatcher.emit_post_module_executed(
+                campaign_id=campaign_id,
+                target_id=target_id,
+                session_id=session_id,
+                module_path=module_path,
+                data=result['data'],
+                db_session=db_session
+            )
+
             return result
 
         except Exception as e:
@@ -477,7 +528,8 @@ class MSFBridge:
         self,
         campaign_id: str,
         target_id: str,
-        sessions: List[Dict]
+        sessions: List[Dict],
+        db_session: Optional[Session] = None
     ) -> Dict:
         """
         Establish Command & Control (C2) communication.
@@ -509,6 +561,17 @@ class MSFBridge:
                 c2_result['c2_channels'].append(channel)
                 logger.info(f"✅ C2 established: {session['session_id']}")
 
+                # Emit C2 established event
+                if db_session:
+                    await MSFWebhookDispatcher.emit_c2_established(
+                        campaign_id=campaign_id,
+                        target_id=target_id,
+                        session_id=session['session_id'],
+                        channel_type='meterpreter',
+                        protocol='https',
+                        db_session=db_session
+                    )
+
             return c2_result
 
         except Exception as e:
@@ -519,6 +582,8 @@ class MSFBridge:
         self,
         session_id: str,
         command: str,
+        campaign_id: str = None,
+        target_id: str = None,
         db_session: Optional[Session] = None
     ) -> Dict:
         """
@@ -527,6 +592,8 @@ class MSFBridge:
         Args:
             session_id: Metasploit session ID
             command: Command to execute
+            campaign_id: Campaign ID (for webhooks)
+            target_id: Target ID (for webhooks)
             db_session: Database session for logging
 
         Returns:
@@ -554,6 +621,27 @@ class MSFBridge:
                 )
                 db_session.add(audit_log)
                 db_session.commit()
+
+                # Get campaign and target IDs from session if not provided
+                if not campaign_id or not target_id:
+                    session = db_session.query(MSFSession).filter(
+                        MSFSession.id == session_id
+                    ).first()
+                    if session:
+                        campaign_id = session.campaign_id
+                        target_id = session.target_id
+
+                # Emit command executed event
+                if campaign_id and target_id:
+                    await MSFWebhookDispatcher.emit_command_executed(
+                        campaign_id=campaign_id,
+                        target_id=target_id,
+                        session_id=session_id,
+                        command=command,
+                        output=result['output'],
+                        exit_code=result['exit_code'],
+                        db_session=db_session
+                    )
 
             return result
 
@@ -592,6 +680,14 @@ class MSFBridge:
                     session.status = 'closed'
                     session.closed_at = datetime.utcnow()
                     db_session.commit()
+
+                    # Emit session closed event
+                    await MSFWebhookDispatcher.emit_session_closed(
+                        campaign_id=session.campaign_id,
+                        target_id=session.target_id,
+                        session_id=session_id,
+                        db_session=db_session
+                    )
 
             logger.info(f"✅ Session closed: {session_id}")
             return True
