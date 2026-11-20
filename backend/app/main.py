@@ -282,6 +282,10 @@ app.include_router(sessions.router, prefix="/api/sessions", tags=["sessions"])
 from app.api import captures
 app.include_router(captures.router, prefix="/api/captures", tags=["captures"])
 
+# Binary Dependencies
+from app.api import binaries
+app.include_router(binaries.router, prefix="/api/binaries", tags=["binaries"])
+
 # Webhooks
 from app.webhooks import capture_webhook, session_webhook
 app.include_router(capture_webhook.router, prefix="/webhook", tags=["webhooks"])
