@@ -325,6 +325,10 @@ app.include_router(webhook_replay.router)
 from app.api import webhook_logs
 app.include_router(webhook_logs.router)
 
+# Webhook Metrics API (Phase 4.1)
+from app.api import webhook_metrics
+app.include_router(webhook_metrics.router)
+
 # Event Webhooks (TODO: will be created in next phase)
 # from app.webhooks import capture_webhook, session_webhook
 # app.include_router(capture_webhook.router, prefix="/webhook", tags=["webhooks"])
