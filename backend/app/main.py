@@ -313,6 +313,14 @@ app.include_router(metasploit.router, prefix="/api/metasploit", tags=["metasploi
 from app.api import webhooks
 app.include_router(webhooks.router, tags=["webhooks"])
 
+# Webhook Delivery Status (Phase 3.4)
+from app.api import webhook_delivery_status
+app.include_router(webhook_delivery_status.router)
+
+# Webhook Replay Service (Phase 3.5)
+from app.api import webhook_replay
+app.include_router(webhook_replay.router)
+
 # Event Webhooks (TODO: will be created in next phase)
 # from app.webhooks import capture_webhook, session_webhook
 # app.include_router(capture_webhook.router, prefix="/webhook", tags=["webhooks"])
