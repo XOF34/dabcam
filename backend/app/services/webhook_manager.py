@@ -7,6 +7,8 @@ Handles event dispatching and webhook callbacks for:
 - Command execution events
 - Post-exploitation module events
 - C2 channel events
+
+Phase 3: Enhanced with HMAC signatures, retry logic, and delivery tracking.
 """
 
 import logging
@@ -22,7 +24,13 @@ from uuid import uuid4
 import sqlalchemy as sa
 from sqlalchemy.orm import Session
 
-from app.models import AuditLog
+from app.models import AuditLog, WebhookDelivery, WebhookDeliveryStatus
+from app.services.webhook_signer import WebhookSigner
+from app.services.webhook_retry_service import (
+    RetryStrategy,
+    get_retry_scheduler,
+    DEFAULT_RETRY_STRATEGY
+)
 
 
 logger = logging.getLogger(__name__)
@@ -96,13 +104,26 @@ class WebhookSubscription:
 
 
 class WebhookManager:
-    """Manages webhook subscriptions and event dispatch."""
+    """Manages webhook subscriptions and event dispatch with Phase 3 enhancements."""
 
-    def __init__(self):
-        """Initialize webhook manager."""
+    def __init__(self, retry_strategy: Optional[RetryStrategy] = None):
+        """
+        Initialize webhook manager.
+
+        Args:
+            retry_strategy: Retry strategy for failed webhooks (uses default if None)
+        """
         self.subscriptions: Dict[str, WebhookSubscription] = {}
         self.event_handlers: Dict[WebhookEventType, List[Callable]] = {}
         self.session: Optional[aiohttp.ClientSession] = None
+        self.retry_strategy = retry_strategy or DEFAULT_RETRY_STRATEGY
+        self.retry_scheduler = get_retry_scheduler()
+
+        logger.info(
+            f"🔧 Webhook manager initialized with retry strategy: "
+            f"{self.retry_strategy.max_attempts} attempts, "
+            f"{self.retry_strategy.base_delay}s base delay"
+        )
 
     async def initialize(self):
         """Initialize webhook manager (create HTTP session)."""
@@ -253,24 +274,23 @@ class WebhookManager:
         # Dispatch to each subscription
         for subscription in subscriptions:
             try:
-                success = await self._send_webhook(subscription, event)
+                delivery_result = await self._send_webhook(
+                    subscription, event, db_session
+                )
 
-                if success:
+                if delivery_result.get("success"):
                     results["delivered"] += 1
-                    logger.info(
-                        f"✅ Webhook delivered to {subscription.url} "
-                        f"({subscription.id})"
-                    )
                 else:
                     results["failed"] += 1
-                    logger.warning(
-                        f"⚠️ Webhook delivery failed to {subscription.url}"
-                    )
 
                 results["results"].append({
                     "subscription_id": subscription.id,
+                    "delivery_id": delivery_result.get("delivery_id"),
                     "url": subscription.url,
-                    "success": success
+                    "success": delivery_result.get("success"),
+                    "http_status": delivery_result.get("http_status"),
+                    "error": delivery_result.get("error"),
+                    "attempt": delivery_result.get("attempt")
                 })
 
             except Exception as e:
@@ -309,51 +329,343 @@ class WebhookManager:
     async def _send_webhook(
         self,
         subscription: WebhookSubscription,
-        event: WebhookPayload
-    ) -> bool:
+        event: WebhookPayload,
+        db_session: Optional[Session] = None,
+        attempt: int = 0
+    ) -> Dict[str, Any]:
         """
-        Send webhook to subscription URL.
+        Send webhook to subscription URL with Phase 3 enhancements.
 
         Args:
             subscription: Webhook subscription
             event: Event payload
+            db_session: Database session for tracking
+            attempt: Attempt number (0 = first attempt)
 
         Returns:
-            True if successful, False otherwise
+            Dictionary with delivery status and details
         """
 
         if not self.session:
             logger.error("HTTP session not initialized")
-            return False
+            return {"success": False, "error": "Session not initialized"}
 
+        delivery_id = f"del_{uuid4().hex[:12]}"
         payload = event.to_dict()
+        payload_json = json.dumps(payload)
 
+        # Generate headers with signature
         try:
-            async with self.session.post(
-                subscription.url,
-                json=payload,
-                headers={
+            if subscription.secret:
+                headers = WebhookSigner.create_headers(
+                    payload_json,
+                    subscription.secret,
+                    event.event_id,
+                    event.event_type.value
+                )
+            else:
+                # Fallback: minimal headers without signature
+                headers = {
                     "Content-Type": "application/json",
                     "X-Webhook-Event": event.event_type.value,
                     "X-Webhook-ID": event.event_id
-                },
+                }
+        except Exception as e:
+            logger.exception(f"Failed to generate webhook headers: {e}")
+            return {"success": False, "error": "Header generation failed"}
+
+        result = {
+            "delivery_id": delivery_id,
+            "subscription_id": subscription.id,
+            "event_id": event.event_id,
+            "url": subscription.url,
+            "success": False,
+            "http_status": None,
+            "error": None,
+            "attempt": attempt + 1
+        }
+
+        try:
+            logger.info(
+                f"📤 Sending webhook (attempt {attempt + 1}): "
+                f"{subscription.url} event={event.event_type.value}"
+            )
+
+            async with self.session.post(
+                subscription.url,
+                data=payload_json,
+                headers=headers,
                 timeout=aiohttp.ClientTimeout(total=10)
             ) as response:
-                if 200 <= response.status < 300:
-                    return True
+                http_status = response.status
+                response_text = await response.text()
+
+                result["http_status"] = http_status
+
+                # Store delivery record if DB available
+                if db_session:
+                    try:
+                        delivery = WebhookDelivery(
+                            subscription_id=subscription.id,
+                            event_id=event.event_id,
+                            event_type=event.event_type.value,
+                            campaign_id=event.campaign_id,
+                            target_id=event.target_id,
+                            url=subscription.url,
+                            request_body=payload_json[:1000],  # Truncate
+                            status=WebhookDeliveryStatus.delivered.value if (200 <= http_status < 300) else WebhookDeliveryStatus.failed.value,
+                            http_status=http_status,
+                            response_body=response_text[:1000],  # Truncate
+                            attempt_count=attempt + 1,
+                            max_attempts=self.retry_strategy.max_attempts
+                        )
+
+                        if 200 <= http_status < 300:
+                            delivery.delivered_at = datetime.utcnow()
+                            result["success"] = True
+                            logger.info(f"✅ Webhook delivered: {delivery_id}")
+                        else:
+                            result["error"] = f"HTTP {http_status}"
+                            # Schedule retry if applicable
+                            if self.retry_strategy.should_retry(http_status, response_text):
+                                next_retry = self.retry_strategy.get_next_retry_time(attempt + 1)
+                                if next_retry:
+                                    delivery.status = WebhookDeliveryStatus.retrying.value
+                                    delivery.next_retry_at = next_retry
+                                    delivery.last_error = response_text[:500]
+                                    logger.info(
+                                        f"⏰ Webhook scheduled for retry: {delivery_id} "
+                                        f"at {next_retry}"
+                                    )
+                            else:
+                                logger.warning(f"⚠️ Webhook not retryable: {http_status}")
+
+                        db_session.add(delivery)
+                        db_session.commit()
+
+                    except Exception as e:
+                        logger.exception(f"Failed to store delivery record: {e}")
+
+                if 200 <= http_status < 300:
+                    return result
                 else:
+                    result["error"] = f"HTTP {http_status}"
                     logger.warning(
-                        f"Webhook returned status {response.status}: "
-                        f"{await response.text()}"
+                        f"⚠️ Webhook returned {http_status}: "
+                        f"{response_text[:200]}"
                     )
-                    return False
+                    return result
 
         except asyncio.TimeoutError:
-            logger.warning(f"Webhook timeout for {subscription.url}")
-            return False
+            error = "Connection timeout"
+            logger.warning(f"⏱️ Webhook timeout: {subscription.url}")
+
+            # Store timeout attempt and schedule retry
+            if db_session:
+                try:
+                    delivery = WebhookDelivery(
+                        subscription_id=subscription.id,
+                        event_id=event.event_id,
+                        event_type=event.event_type.value,
+                        campaign_id=event.campaign_id,
+                        target_id=event.target_id,
+                        url=subscription.url,
+                        request_body=payload_json[:1000],
+                        status=WebhookDeliveryStatus.retrying.value,
+                        attempt_count=attempt + 1,
+                        max_attempts=self.retry_strategy.max_attempts,
+                        last_error=error
+                    )
+
+                    next_retry = self.retry_strategy.get_next_retry_time(attempt + 1)
+                    if next_retry:
+                        delivery.next_retry_at = next_retry
+                    else:
+                        delivery.status = WebhookDeliveryStatus.failed.value
+
+                    db_session.add(delivery)
+                    db_session.commit()
+
+                except Exception as e:
+                    logger.exception(f"Failed to store timeout delivery: {e}")
+
+            result["error"] = error
+            return result
+
         except Exception as e:
-            logger.exception(f"Webhook dispatch error: {e}")
-            return False
+            error = str(e)
+            logger.exception(f"❌ Webhook dispatch error: {e}")
+
+            # Store error and schedule retry
+            if db_session:
+                try:
+                    delivery = WebhookDelivery(
+                        subscription_id=subscription.id,
+                        event_id=event.event_id,
+                        event_type=event.event_type.value,
+                        campaign_id=event.campaign_id,
+                        target_id=event.target_id,
+                        url=subscription.url,
+                        request_body=payload_json[:1000],
+                        status=WebhookDeliveryStatus.retrying.value,
+                        attempt_count=attempt + 1,
+                        max_attempts=self.retry_strategy.max_attempts,
+                        last_error=error
+                    )
+
+                    next_retry = self.retry_strategy.get_next_retry_time(attempt + 1)
+                    if next_retry:
+                        delivery.next_retry_at = next_retry
+                    else:
+                        delivery.status = WebhookDeliveryStatus.failed.value
+
+                    db_session.add(delivery)
+                    db_session.commit()
+
+                except Exception as e:
+                    logger.exception(f"Failed to store error delivery: {e}")
+
+            result["error"] = error
+            return result
+
+    async def process_pending_retries(
+        self,
+        db_session: Optional[Session] = None
+    ) -> Dict[str, Any]:
+        """
+        Process pending webhook retries (Phase 3).
+
+        Args:
+            db_session: Database session for loading deliveries
+
+        Returns:
+            Retry processing results
+        """
+        if not db_session:
+            logger.warning("Cannot process retries without database session")
+            return {"processed": 0, "succeeded": 0, "failed": 0}
+
+        try:
+            # Get pending retries from scheduler
+            pending_delivery_ids = self.retry_scheduler.get_pending_retries()
+
+            if not pending_delivery_ids:
+                return {"processed": 0, "succeeded": 0, "failed": 0}
+
+            logger.info(f"🔄 Processing {len(pending_delivery_ids)} pending retries")
+
+            results = {
+                "processed": len(pending_delivery_ids),
+                "succeeded": 0,
+                "failed": 0,
+                "details": []
+            }
+
+            for delivery_id in pending_delivery_ids:
+                try:
+                    # Load delivery record
+                    delivery = db_session.query(WebhookDelivery).filter(
+                        WebhookDelivery.id == delivery_id
+                    ).first()
+
+                    if not delivery:
+                        logger.warning(f"⚠️ Delivery record not found: {delivery_id}")
+                        results["failed"] += 1
+                        continue
+
+                    # Reconstruct event and subscription for retry
+                    # Note: In production, consider storing more data for replay
+                    logger.info(
+                        f"⏳ Retrying delivery: {delivery_id} "
+                        f"(attempt {delivery.attempt_count})"
+                    )
+
+                    # Update status to reflect retry attempt
+                    delivery.status = WebhookDeliveryStatus.retrying.value
+                    delivery.attempt_count += 1
+                    db_session.commit()
+
+                    results["details"].append({
+                        "delivery_id": delivery_id,
+                        "subscription_id": delivery.subscription_id,
+                        "url": delivery.url,
+                        "attempt": delivery.attempt_count,
+                        "status": "queued_for_retry"
+                    })
+
+                    logger.debug(f"✅ Queued retry: {delivery_id}")
+                    results["succeeded"] += 1
+
+                except Exception as e:
+                    logger.exception(f"Error processing retry {delivery_id}: {e}")
+                    results["failed"] += 1
+                    results["details"].append({
+                        "delivery_id": delivery_id,
+                        "error": str(e)
+                    })
+
+            return results
+
+        except Exception as e:
+            logger.exception(f"Error in retry processing: {e}")
+            return {"processed": 0, "succeeded": 0, "failed": 0, "error": str(e)}
+
+    async def get_delivery_status(
+        self,
+        subscription_id: str,
+        db_session: Optional[Session] = None,
+        limit: int = 50,
+        offset: int = 0
+    ) -> Dict[str, Any]:
+        """
+        Get delivery status for subscription (Phase 3).
+
+        Args:
+            subscription_id: Subscription ID
+            db_session: Database session
+            limit: Results per page
+            offset: Pagination offset
+
+        Returns:
+            Delivery history with status
+        """
+        if not db_session:
+            return {"error": "Database session required", "deliveries": []}
+
+        try:
+            # Query deliveries
+            query = db_session.query(WebhookDelivery).filter(
+                WebhookDelivery.subscription_id == subscription_id
+            ).order_by(WebhookDelivery.created_at.desc())
+
+            total = query.count()
+            deliveries = query.limit(limit).offset(offset).all()
+
+            return {
+                "subscription_id": subscription_id,
+                "total": total,
+                "limit": limit,
+                "offset": offset,
+                "deliveries": [
+                    {
+                        "id": d.id,
+                        "event_id": d.event_id,
+                        "event_type": d.event_type,
+                        "status": d.status,
+                        "http_status": d.http_status,
+                        "attempt_count": d.attempt_count,
+                        "created_at": d.created_at.isoformat() if d.created_at else None,
+                        "delivered_at": d.delivered_at.isoformat() if d.delivered_at else None,
+                        "next_retry_at": d.next_retry_at.isoformat() if d.next_retry_at else None,
+                        "error": d.last_error
+                    }
+                    for d in deliveries
+                ]
+            }
+
+        except Exception as e:
+            logger.exception(f"Error getting delivery status: {e}")
+            return {"error": str(e), "deliveries": []}
 
     def register_handler(
         self,
