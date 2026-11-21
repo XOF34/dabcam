@@ -1,0 +1,108 @@
+# Environment variables
+.env
+.env.local
+.env.*.local
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+pip-wheel-metadata/
+share/python-wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+MANIFEST
+
+# Virtual environments
+venv/
+ENV/
+env/
+.venv
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.DS_Store
+*.sublime-project
+*.sublime-workspace
+
+# Testing
+.pytest_cache/
+.coverage
+htmlcov/
+.tox/
+
+# Node
+node_modules/
+npm-debug.log
+yarn-error.log
+dist/
+build/
+
+# Docker
+.docker/
+docker-compose.override.yml
+
+# Database
+*.db
+*.sqlite
+*.sqlite3
+pgdata/
+
+# Logs
+logs/
+*.log
+
+# Security & Credentials
+*.pem
+*.key
+*.crt
+*.pfx
+secrets/
+credentials.json
+
+# Media
+captures/
+uploads/
+*.jpg
+*.jpeg
+*.png
+*.gif
+
+# OS
+Thumbs.db
+.AppleDouble
+.LSOverride
+
+# Project specific
+.vscode/settings.json
+secure/storage/*
+secure/binaries/*
+!secure/storage/.gitkeep
+!secure/binaries/.gitkeep
+
+# Temporary files
+*.tmp
+*.bak
+*~
+
+# Keep some important directories
+!.gitkeep
