@@ -4,7 +4,7 @@ Database Models for Dabcam + MetasploitMCP
 Unified schema for campaign management, target tracking, and exploitation
 """
 
-from sqlalchemy import Column, String, Integer, DateTime, Boolean, JSON, Enum, ForeignKey, Text, LargeBinary
+from sqlalchemy import Column, String, Integer, DateTime, Boolean, JSON, Enum, ForeignKey, Text, LargeBinary, Index
 from sqlalchemy.ext.declarative import declarative_base
 from sqlalchemy.orm import relationship
 from datetime import datetime
@@ -330,3 +330,134 @@ class SessionToken(Base):
 
     def __repr__(self):
         return f"<SessionToken {self.user_id}>"
+
+# ============================================
+# Webhook Delivery Tracking (Phase 3)
+# ============================================
+
+class WebhookDeliveryStatus(str, enum.Enum):
+    pending = "pending"
+    delivered = "delivered"
+    failed = "failed"
+    retrying = "retrying"
+
+class WebhookDelivery(Base):
+    """Track webhook delivery attempts and status"""
+    __tablename__ = "webhook_deliveries"
+
+    id = Column(String(36), primary_key=True, default=lambda: str(uuid.uuid4()))
+
+    # Event Information
+    subscription_id = Column(String(255), nullable=False, index=True)
+    event_id = Column(String(255), nullable=False, index=True)
+    event_type = Column(String(255), nullable=False)
+    campaign_id = Column(String(255), nullable=True)
+    target_id = Column(String(255), nullable=True)
+
+    # Webhook Details
+    url = Column(Text, nullable=False)
+    request_body = Column(Text, nullable=True)  # Webhook payload (truncated)
+
+    # Delivery Status
+    status = Column(String(20), default=WebhookDeliveryStatus.pending.value, index=True)
+    http_status = Column(Integer, nullable=True)
+    response_body = Column(Text, nullable=True)  # First 1000 chars of response
+
+    # Retry Information
+    attempt_count = Column(Integer, default=0)
+    max_attempts = Column(Integer, default=5)
+    next_retry_at = Column(DateTime, nullable=True, index=True)
+    last_error = Column(Text, nullable=True)
+
+    # Timing
+    created_at = Column(DateTime, default=datetime.utcnow, index=True)
+    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+    delivered_at = Column(DateTime, nullable=True)
+
+    # Composite indices for efficient queries
+    __table_args__ = (
+        Index("ix_webhook_deliveries_subscription_created", "subscription_id", "created_at"),
+        Index("ix_webhook_deliveries_status_retry", "status", "next_retry_at"),
+        Index("ix_webhook_deliveries_event_status", "event_id", "status"),
+    )
+
+    def __repr__(self):
+        return f"<WebhookDelivery {self.id} {self.status}>"
+
+# ============================================
+# Webhook Logs (Phase 3)
+# ============================================
+
+class WebhookLog(Base):
+    """Historical logs of all webhook activity"""
+    __tablename__ = "webhook_logs"
+
+    id = Column(String(36), primary_key=True, default=lambda: str(uuid.uuid4()))
+
+    # Event Information
+    event_id = Column(String(255), nullable=False, index=True)
+    event_type = Column(String(255), nullable=False, index=True)
+    campaign_id = Column(String(255), nullable=True)
+    target_id = Column(String(255), nullable=True)
+
+    # Subscription Information
+    subscription_id = Column(String(255), nullable=False, index=True)
+
+    # Delivery Summary
+    total_deliveries = Column(Integer, default=0)
+    successful_deliveries = Column(Integer, default=0)
+    failed_deliveries = Column(Integer, default=0)
+
+    # Event Payload (truncated)
+    event_payload = Column(JSON, nullable=True)
+
+    # Processing Details
+    processed_at = Column(DateTime, default=datetime.utcnow, index=True)
+    completed_at = Column(DateTime, nullable=True)
+    duration_ms = Column(Integer, nullable=True)
+
+    def __repr__(self):
+        return f"<WebhookLog {self.event_id} → {self.subscription_id}>"
+
+# ============================================
+# Webhook Replay Log (Phase 3)
+# ============================================
+
+class WebhookReplayStatus(str, enum.Enum):
+    pending = "pending"
+    in_progress = "in_progress"
+    completed = "completed"
+    failed = "failed"
+
+class WebhookReplay(Base):
+    """Track webhook replay operations"""
+    __tablename__ = "webhook_replays"
+
+    id = Column(String(36), primary_key=True, default=lambda: str(uuid.uuid4()))
+
+    # Replay Configuration
+    subscription_id = Column(String(255), nullable=True, index=True)
+    event_id = Column(String(255), nullable=True, index=True)
+    event_type = Column(String(255), nullable=True)
+
+    # Filter Parameters
+    filter_params = Column(JSON, nullable=True)
+
+    # Replay Results
+    status = Column(String(20), default=WebhookReplayStatus.pending.value)
+    total_events = Column(Integer, default=0)
+    events_queued = Column(Integer, default=0)
+    events_delivered = Column(Integer, default=0)
+    events_failed = Column(Integer, default=0)
+
+    # Timing
+    created_at = Column(DateTime, default=datetime.utcnow, index=True)
+    started_at = Column(DateTime, nullable=True)
+    completed_at = Column(DateTime, nullable=True)
+
+    # Metadata
+    created_by = Column(String(255), nullable=False)
+    notes = Column(Text, nullable=True)
+
+    def __repr__(self):
+        return f"<WebhookReplay {self.id} {self.status}>"
