@@ -4,7 +4,7 @@ Database Models for Dabcam + MetasploitMCP
 Unified schema for campaign management, target tracking, and exploitation
 """
 
-from sqlalchemy import Column, String, Integer, DateTime, Boolean, JSON, Enum, ForeignKey, Text, LargeBinary
+from sqlalchemy import Column, String, Integer, DateTime, Boolean, JSON, Enum, ForeignKey, Text, LargeBinary, Index
 from sqlalchemy.ext.declarative import declarative_base
 from sqlalchemy.orm import relationship
 from datetime import datetime
@@ -376,9 +376,9 @@ class WebhookDelivery(Base):
 
     # Composite indices for efficient queries
     __table_args__ = (
-        ("ix_webhook_deliveries_subscription_created", ["subscription_id", "created_at"]),
-        ("ix_webhook_deliveries_status_retry", ["status", "next_retry_at"]),
-        ("ix_webhook_deliveries_event_status", ["event_id", "status"]),
+        Index("ix_webhook_deliveries_subscription_created", "subscription_id", "created_at"),
+        Index("ix_webhook_deliveries_status_retry", "status", "next_retry_at"),
+        Index("ix_webhook_deliveries_event_status", "event_id", "status"),
     )
 
     def __repr__(self):
